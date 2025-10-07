@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       issue_number:
-        description: 'Issue number to process'
+        description: "Issue number to process"
         required: false
 
 jobs:
@@ -14,38 +14,42 @@ jobs:
     if: github.event.label.name == 'ai-agent' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    
+
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_TOKEN }}
           fetch-depth: 0
-      
+
       - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
-      
+          python-version: "3.11"
+          cache: "pip"
+
       - name: 📦 Install dependencies
         run: |
-          pip install anthropic PyGithub gitpython
-      
+          pip install openai PyGithub gitpython
+
       - name: ⚙️ Configure Git
         run: |
           git config --global user.name "AI Agent Bot"
           git config --global user.email "ai-agent@users.noreply.github.com"
-      
+
       - name: 🤖 Run AI Agent
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          # подхватим оба варианта ключа:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPEN_AI_TOKEN: ${{ secrets.OPEN_AI_TOKEN }}
           REPO_NAME: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          # опционально можно переопределить модель (по умолчанию алиас 'codex' -> gpt-4.1-mini)
+          MODEL_NAME: codex
         run: |
           python agent.py
-      
+
       - name: 📋 Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -54,4 +58,5 @@ jobs:
           path: logs/
           if-no-files-found: ignore
           retention-days: 7
+
 
