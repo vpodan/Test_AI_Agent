@@ -1,0 +1,23 @@
+fastapi
+uvicorn
+pydantic
+flask
+twilio
+openai
+python-dotenv
+pymongo
+requests
+pandas
+numpy
+scrapy
+beautifulsoup4
+lxml
+selenium
+webdriver-manager
+# Для векторного поиска и embeddings
+langchain
+langchain-openai
+langchain-community
+langchain-chroma
+chromadb
+sentence-transformers
