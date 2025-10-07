@@ -1,0 +1,55 @@
+name: AI Agent
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to process'
+        required: false
+
+jobs:
+  ai-agent:
+    if: github.event.label.name == 'ai-agent' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          fetch-depth: 0
+      
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: 📦 Install dependencies
+        run: |
+          pip install anthropic PyGithub gitpython
+      
+      - name: ⚙️ Configure Git
+        run: |
+          git config --global user.name "AI Agent Bot"
+          git config --global user.email "ai-agent@users.noreply.github.com"
+      
+      - name: 🤖 Run AI Agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_KEY }}
+          REPO_NAME: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python agent.py
+      
+      - name: 📋 Upload logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: agent-logs
+          path: logs/
+          retention-days: 7
