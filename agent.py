@@ -40,7 +40,7 @@ REPO_NAME = os.environ.get("REPO_NAME")  # org/repo
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 # поддерживаем оба названия секрета
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPEN_AI_TOKEN")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5")
 
 ALLOWED_MAX_FILES = 12
 ALLOWED_MAX_BYTES_PER_FILE = 200_000  # ~200 KB
@@ -97,7 +97,7 @@ def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str
             {"role": "user", "content": user_prompt},
         ],
         "response_format": {"type": "json_object"},
-        "max_tokens": 3500,
+        "max_tokens": 133500,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
