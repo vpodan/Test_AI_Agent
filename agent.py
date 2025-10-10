@@ -398,7 +398,7 @@ def main():
         ],
     )
 
-system_prompt = (
+   system_prompt = (
         "You are an autonomous senior Python engineer working inside a CI bot for GitHub.\n"
         "Given an issue (title + body) and a brief repo context, you must propose a minimal,\n"
         "safe and incremental solution and PRODUCE CONCRETE CODE CHANGES.\n\n"
@@ -422,7 +422,6 @@ system_prompt = (
         "- Prefer small, atomic changes and add/update tests when reasonable.\n"
         "- Keep paths inside repo; never use absolute or parent paths.\n"
     )
-
 
     user_prompt = (
         f"Issue Title:\n{issue_title}\n\n"
