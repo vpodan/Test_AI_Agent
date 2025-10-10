@@ -51,7 +51,7 @@ jobs:
           OPEN_AI_TOKEN: ${{ secrets.OPEN_AI_TOKEN }}
           REPO_NAME: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}    # при workflow_dispatch будет пусто — агент возьмёт из GITHUB_EVENT_PATH
-          OPENAI_MODEL: gpt-4.1-mini                        # <-- правильное имя переменной
+          OPENAI_MODEL: gpt-5                        # <-- правильное имя переменной
         run: |
           python agent.py
 
