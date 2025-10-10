@@ -9,6 +9,11 @@ on:
         description: "Issue number to process"
         required: false
 
+permissions:
+  contents: write        # push branch
+  pull-requests: write   # create PR
+  issues: write          # писать комменты
+
 jobs:
   ai-agent:
     if: github.event.label.name == 'ai-agent' || github.event_name == 'workflow_dispatch'
@@ -19,6 +24,7 @@ jobs:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
         with:
+          # можно не указывать token — по умолчанию возьмётся GITHUB_TOKEN
           token: ${{ secrets.GH_TOKEN }}
           fetch-depth: 0
 
@@ -30,7 +36,8 @@ jobs:
 
       - name: 📦 Install dependencies
         run: |
-          pip install openai PyGithub gitpython
+          pip install PyGithub gitpython
+          # openai не обязателен для текущей реализации через urllib
 
       - name: ⚙️ Configure Git
         run: |
@@ -39,14 +46,12 @@ jobs:
 
       - name: 🤖 Run AI Agent
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-          # подхватим оба варианта ключа:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}             # или ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}     # агент читает и это, и OPEN_AI_TOKEN
           OPEN_AI_TOKEN: ${{ secrets.OPEN_AI_TOKEN }}
           REPO_NAME: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          # опционально можно переопределить модель (по умолчанию алиас 'codex' -> gpt-4.1-mini)
-          MODEL_NAME: codex
+          ISSUE_NUMBER: ${{ github.event.issue.number }}    # при workflow_dispatch будет пусто — агент возьмёт из GITHUB_EVENT_PATH
+          OPENAI_MODEL: gpt-4.1-mini                        # <-- правильное имя переменной
         run: |
           python agent.py
 
@@ -58,5 +63,4 @@ jobs:
           path: logs/
           if-no-files-found: ignore
           retention-days: 7
-
 
