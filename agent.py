@@ -2,19 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-Autonomous GitHub AI Agent (gpt-5)
-- Анализирует Issue
-- Генерирует план и правки (JSON) через OpenAI Chat Completions
-- Создаёт ветку, коммит, пушит и открывает Pull Request
-- Пишет комментарии в Issue
+Autonomous GitHub AI Agent (robust, gpt-5-ready)
 
 ENV (из workflow):
   GITHUB_TOKEN        - токен GitHub (permissions: contents/pull-requests/issues: write)
   OPENAI_API_KEY      - ключ OpenAI (или OPEN_AI_TOKEN)
-  OPEN_AI_TOKEN       - альтернативное имя ключа (если не задан OPENAI_API_KEY)
+  OPEN_AI_TOKEN       - альтернативное имя ключа
   REPO_NAME           - org/repo
   ISSUE_NUMBER        - номер issue (опционально)
-  OPENAI_MODEL        - имя модели (по умолчанию 'gpt-5')
+  OPENAI_MODEL        - имя модели (напр. 'gpt-5', 'gpt-4.1-mini'); default: 'gpt-5'
 """
 
 import os
@@ -122,6 +118,7 @@ def extract_json_object(text: str) -> dict:
     return json.loads(s[start:last])
 
 def _repair_json_with_llm(bad_text: str, model: str) -> dict:
+    """Просим модель починить JSON и вернуть ровно один объект."""
     url = "https://api.openai.com/v1/chat/completions"
     token_key = "max_completion_tokens" if model.startswith("gpt-5") else "max_tokens"
     system = (
@@ -138,7 +135,7 @@ def _repair_json_with_llm(bad_text: str, model: str) -> dict:
             {"role": "user", "content": user},
         ],
         "response_format": {"type": "json_object"},
-        token_key: 2500,
+        token_key: 1500,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -148,7 +145,7 @@ def _repair_json_with_llm(bad_text: str, model: str) -> dict:
             "Content-Type": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=900) as resp:
+    with urllib.request.urlopen(req, timeout=600) as resp:
         raw = resp.read().decode("utf-8")
         obj = json.loads(raw)
         content = obj["choices"][0]["message"]["content"]
@@ -160,7 +157,7 @@ def _repair_json_with_llm(bad_text: str, model: str) -> dict:
 def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str) -> dict:
     """
     Вызов OpenAI Chat Completions.
-    gpt-5 → max_completion_tokens, ретраи, таймаут 300, многоступенчатый парсинг/ремонт.
+    gpt-5 → max_completion_tokens; ретраи; таймаут 300; многоступенчатый парсинг/ремонт.
     """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY/OPEN_AI_TOKEN is not set.")
@@ -175,7 +172,7 @@ def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str
             {"role": "user", "content": user_prompt},
         ],
         "response_format": {"type": "json_object"},
-        token_key: 2500,
+        token_key: 1500,
     }
     data = json.dumps(payload).encode("utf-8")
 
@@ -192,7 +189,6 @@ def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str
             obj = json.loads(raw)
             return obj["choices"][0]["message"]["content"]
 
-    # Ретраи при таймауте
     attempts = 0
     raw_content = None
     while attempts < 3:
@@ -202,13 +198,9 @@ def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str
         except TimeoutError:
             attempts += 1
             log.warning("⏳ Timeout waiting for OpenAI (attempt %d/3)", attempts)
-            if attempts == 1:
-                # ужимаем длину ответа
-                payload[token_key] = 900
-                data = json.dumps(payload).encode("utf-8")
-            elif attempts == 2:
-                payload[token_key] = 600
-                data = json.dumps(payload).encode("utf-8")
+            # динамически уменьшаем лимит вывода
+            payload[token_key] = max(600, payload[token_key] - 300)
+            data = json.dumps(payload).encode("utf-8")
         except urllib.error.HTTPError as e:
             msg = e.read().decode("utf-8", errors="ignore")
             log.error("OpenAI HTTPError: %s", msg)
@@ -220,17 +212,17 @@ def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str
     if raw_content is None:
         raise TimeoutError("OpenAI did not return in time after retries.")
 
-    # Парсинг 1
+    # 1) прямой JSON
     try:
         return json.loads(raw_content)
     except Exception:
         pass
-    # Парсинг 2
+    # 2) снять бэктики
     try:
         return json.loads(_strip_code_fences(raw_content))
     except Exception:
         pass
-    # Парсинг 3
+    # 3) извлечь {…}
     try:
         return extract_json_object(raw_content)
     except Exception:
@@ -322,6 +314,48 @@ def collect_repo_context_for_prompt(root: Path, interesting_files: list[str], ma
             out.append(f"\n--- FILE: {rel} (not found) ---")
     return "\n".join(out)
 
+# ---------------------- ЛОГИКА НЕПУСТЫХ ИЗМЕНЕНИЙ -------------------
+def strict_second_pass(issue_title: str, issue_body: str, context_text: str, model: str) -> list[dict]:
+    """Строгий повторный запрос: обязателен минимум 1 change."""
+    system = (
+        "Return ONLY a minified JSON object with keys: plan_markdown, changes, summary_commit_message. "
+        "HARD REQUIREMENT: changes.length >= 1. "
+        "If uncertain, create 'docs/ai_agent_plan.md' with a short plan and test checklist."
+    )
+    user = (
+        f"Issue Title:\n{issue_title}\n\n"
+        f"Issue Body:\n{issue_body}\n\n"
+        f"{context_text}\n\n"
+        "Output JSON only."
+    )
+    try:
+        obj = openai_chat_completion_json(system, user, model)
+        ch = obj.get("changes", [])
+        return ch if isinstance(ch, list) else []
+    except Exception:
+        return []
+
+def fallback_minimal_change(issue_title: str, issue_body: str) -> list[dict]:
+    """Если LLM упрямо молчит — создаём минимальный docs-артефакт, чтобы всегда был PR."""
+    content = (
+        "# AI Agent Plan\n\n"
+        f"**Issue title:** {issue_title}\n\n"
+        "## Proposed steps\n"
+        "1. Clarify requirements and acceptance criteria.\n"
+        "2. Implement minimal, testable change.\n"
+        "3. Add/adjust tests and docs.\n\n"
+        "## Test checklist\n"
+        "- [ ] Unit tests updated/added\n"
+        "- [ ] Lint passes\n"
+        "- [ ] CI green\n"
+    )
+    return [{
+        "path": "docs/ai_agent_plan.md",
+        "op": "create",
+        "content": content,
+        "message": "docs: add ai_agent_plan.md (fallback auto-generated)"
+    }]
+
 # ---------------------------- ОСНОВНОЕ --------------------------------
 def main():
     log.info("==================================================")
@@ -379,20 +413,21 @@ def main():
         "You are an autonomous senior Python engineer inside a CI bot for GitHub.\n"
         "Given an issue (title + body) and a brief repo context, you must propose a minimal,\n"
         "safe and incremental solution and PRODUCE CONCRETE CODE CHANGES.\n\n"
-        "Return ONLY a valid, minified JSON object with this exact schema:\n"
+        "You MUST return a valid, minified JSON object with this schema:"
         "{"
         "\"plan_markdown\":\"string\","
         "\"changes\":[{\"path\":\"string\",\"op\":\"create|update\",\"content\":\"string\",\"message\":\"string(optional)\"}],"
         "\"summary_commit_message\":\"string\""
-        "}\n"
-        "- No prose, no backticks, no markdown fences. Single JSON object only.\n"
+        "}"
+        " HARD REQUIREMENT: changes.length >= 1. "
+        "If uncertain, create 'docs/ai_agent_plan.md' with a short plan and test checklist.\n"
+        "- No prose, no backticks, single JSON only.\n"
         f"- No more than {ALLOWED_MAX_FILES} files; each file <= {ALLOWED_MAX_BYTES_PER_FILE} bytes.\n"
         "- Do not delete files. Only create or update.\n"
         "- Keep code self-contained and runnable. Include imports if needed.\n"
         "- Prefer small, atomic changes and add/update tests when reasonable.\n"
         "- Keep paths inside repo; never use absolute or parent paths.\n"
     )
-
     user_prompt = (
         f"Issue Title:\n{issue_title}\n\n"
         f"Issue Body:\n{issue_body}\n\n"
@@ -400,24 +435,40 @@ def main():
         "Now, produce the JSON as specified. No prose, no backticks."
     )
 
+    # 1) основной вызов
     try:
         llm_json = openai_chat_completion_json(system_prompt, user_prompt, OPENAI_MODEL)
     except Exception as e:
         add_issue_comment(gh_repo, issue_number, f"⚠️ Ошибка LLM: {e}")
         raise
 
-    plan_md = (llm_json.get("plan_markdown") or "").strip()
     changes = llm_json.get("changes", [])
+    plan_md = (llm_json.get("plan_markdown") or "").strip()
     summary_commit = (llm_json.get("summary_commit_message") or "AI: apply changes").strip()
 
+    # 2) если пусто — строгий второй проход
     if not isinstance(changes, list) or not changes:
-        add_issue_comment(gh_repo, issue_number, "ℹ️ Модель не предложила изменений. Уточни формулировку Issue.")
-        log.info("No changes proposed by model.")
-        return
+        log.info("ℹ️ First pass produced no changes — running strict second pass.")
+        forced = strict_second_pass(issue_title, issue_body, context_text, OPENAI_MODEL)
+        if forced:
+            changes = forced
+            if not plan_md:
+                plan_md = "Auto-generated plan by strict second pass."
+            if not summary_commit or summary_commit == "AI: apply changes":
+                summary_commit = "AI: apply changes (strict pass)"
+        else:
+            # 3) окончательный fallback — создаём docs/ai_agent_plan.md
+            log.info("ℹ️ Strict pass still empty — creating fallback change.")
+            changes = fallback_minimal_change(issue_title, issue_body)
+            if not plan_md:
+                plan_md = "Fallback plan document created."
+            summary_commit = "docs: add ai_agent_plan.md (fallback)"
 
+    # Публикуем план
     if plan_md:
         add_issue_comment(gh_repo, issue_number, f"🧠 Анализ и план:\n\n{plan_md}")
 
+    # Ветка/коммит/PR
     branch = f"ai-issue-{issue_number}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
     log.info("📦 Creating branch: %s (base=%s)", branch, base_branch)
 
@@ -474,7 +525,5 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(1)
-
-
 
 
