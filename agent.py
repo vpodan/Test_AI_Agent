@@ -169,13 +169,13 @@ def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str
     token_key = "max_completion_tokens" if model.startswith("gpt-5") else "max_tokens"
     payload = {
         "model": model,
-        "temperature": 0.1,
+        "temperature": 1,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         "response_format": {"type": "json_object"},
-        token_key: 1500,
+        token_key: 2500,
     }
     data = json.dumps(payload).encode("utf-8")
 
