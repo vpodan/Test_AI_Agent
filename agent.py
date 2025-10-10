@@ -199,7 +199,7 @@ def openai_api_call(system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         try:
             rsp = client.chat.completions.create(
                 model=os.environ.get("OPENAI_MODEL", "gpt-5"),
-                temperature=0,
+                temperature=1,
                 # для gpt-5 нужен именно max_completion_tokens
                 max_completion_tokens=2000,
                 tools=[tool],
