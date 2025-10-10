@@ -132,13 +132,13 @@ def _repair_json_with_llm(bad_text: str, model: str) -> dict:
     user = f"Fix and return only JSON object from the following text:\n\n{bad_text}"
     payload = {
         "model": model,
-        "temperature": 0.0,
+        "temperature": 1,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         "response_format": {"type": "json_object"},
-        token_key: 800,
+        token_key: 2500,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -148,7 +148,7 @@ def _repair_json_with_llm(bad_text: str, model: str) -> dict:
             "Content-Type": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=180) as resp:
+    with urllib.request.urlopen(req, timeout=900) as resp:
         raw = resp.read().decode("utf-8")
         obj = json.loads(raw)
         content = obj["choices"][0]["message"]["content"]
