@@ -152,34 +152,101 @@ def extract_json_object(text: str) -> Dict[str, Any]:
     return json.loads(json_str)
 
 def openai_api_call(system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    """
+    GPT-5 через chat.completions + tool calling (строгая схема).
+    Возвращает dict, собранный из tool_calls[0].function.arguments.
+    """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY / OPEN_AI_TOKEN is not set")
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # 1) Попытка №1: Responses API + строгая JSON-схема
-    schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["plan_markdown", "changes", "summary_commit_message"],
-        "properties": {
-            "plan_markdown": {"type": "string"},
-            "changes": {
-                "type": "array",
-                "maxItems": 12,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["path", "op", "content"],
-                    "properties": {
-                        "path": {"type": "string"},
-                        "op": {"type": "string", "enum": ["create", "update"]},
-                        "content": {"type": ["string", "object", "array", "number", "boolean", "null"]},
+    # Описываем "инструмент" с нужной JSON-схемой
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "submit_agent_output",
+            "description": "Return the agent's final JSON payload.",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["plan_markdown", "changes", "summary_commit_message"],
+                "properties": {
+                    "plan_markdown": {"type": "string"},
+                    "changes": {
+                        "type": "array",
+                        "maxItems": 12,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["path", "op", "content"],
+                            "properties": {
+                                "path": {"type": "string"},
+                                "op": {"type": "string", "enum": ["create", "update"]},
+                                "content": {
+                                    "type": ["string", "object", "array", "number", "boolean", "null"]
+                                },
+                            },
+                        },
                     },
+                    "summary_commit_message": {"type": "string"},
                 },
             },
-            "summary_commit_message": {"type": "string"},
         },
     }
+
+    max_retries = 2
+    last_err: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 2):
+        try:
+            rsp = client.chat.completions.create(
+                model=os.environ.get("OPENAI_MODEL", "gpt-5"),
+                temperature=1,
+                # ВАЖНО: у gpt-5 именно max_completion_tokens
+                max_completion_tokens=2000,
+                tools=[tool],
+                tool_choice={"type": "function", "function": {"name": "submit_agent_output"}},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+
+            choice = rsp.choices[0]
+            # Иногда content пустой — это ок, нам нужен tool_calls
+            tool_calls = getattr(choice.message, "tool_calls", None) or []
+            if not tool_calls:
+                raise ValueError("Model did not return tool_calls")
+
+            fn = tool_calls[0].function
+            args_raw = fn.arguments or ""
+            if not isinstance(args_raw, str) or not args_raw.strip():
+                raise ValueError("Empty tool call arguments")
+
+            # arguments гарантированно JSON-строка по схеме
+            payload = json.loads(args_raw)
+
+            # Дополнительные проверки размеров/кол-ва сразу здесь
+            changes = payload.get("changes", [])
+            if not isinstance(changes, list) or len(changes) == 0:
+                raise ValueError("changes must be a non-empty array")
+            if len(changes) > ALLOWED_MAX_FILES:
+                raise ValueError(f"Too many files: {len(changes)} (max {ALLOWED_MAX_FILES})")
+
+            # Приводим content к строке при необходимости (будем сериализовать позже)
+            for ch in changes:
+                if not isinstance(ch, dict):
+                    raise ValueError("Invalid change item")
+                if "content" in ch and not isinstance(ch["content"], str):
+                    ch["content"] = json.dumps(ch["content"], ensure_ascii=False, indent=2)
+
+            return payload
+
+        except Exception as e:
+            last_err = e
+            log.error("OpenAI tool-calls error (attempt %d): %s", attempt, e)
+
+    raise RuntimeError(f"OpenAI tool-calls failed after retries: {last_err}")
 
     def _extract_text_from_response(resp) -> str:
         # SDK v2: удобный хелпер
@@ -237,7 +304,7 @@ def openai_api_call(system_prompt: str, user_prompt: str) -> Dict[str, Any]:
     try:
         rsp = client.chat.completions.create(
             model=os.environ.get("OPENAI_MODEL", "gpt-5"),
-            temperature=0,
+            temperature=1,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
