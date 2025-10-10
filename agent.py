@@ -398,23 +398,30 @@ def main():
         ],
     )
 
- system_prompt = (
-    "You are an autonomous senior Python engineer inside a CI bot for GitHub.\n"
-    "Given an issue (title + body) and a brief repo context, you must propose a minimal,\n"
-    "safe and incremental solution and PRODUCE CONCRETE CODE CHANGES.\n\n"
-    "Return ONLY a **valid, minified JSON object** with this exact schema:\n"
-    "{\n"
-    "  \"plan_markdown\": \"string\",\n"
-    "  \"changes\": [ { \"path\": \"string\", \"op\": \"create|update\", \"content\": \"string\", \"message\": \"string(optional)\" } ],\n"
-    "  \"summary_commit_message\": \"string\"\n"
-    "}\n"
-    "- No prose, no backticks, no markdown fences. Output must be a single JSON object.\n"
-    f"- No more than {ALLOWED_MAX_FILES} files; each file <= {ALLOWED_MAX_BYTES_PER_FILE} bytes.\n"
-    "- Do not delete files. Only create or update.\n"
-    "- Keep code self-contained and runnable. Include imports if needed.\n"
-    "- Prefer small, atomic changes and add/update tests when reasonable.\n"
-    "- Keep paths inside repo; never use absolute or parent paths.\n"
-)
+system_prompt = (
+        "You are an autonomous senior Python engineer working inside a CI bot for GitHub.\n"
+        "Given an issue (title + body) and a brief repo context, you must propose a minimal,\n"
+        "safe and incremental solution and PRODUCE CONCRETE CODE CHANGES.\n\n"
+        "Return ONLY a valid JSON object with this schema:\n"
+        "{\n"
+        "  \"plan_markdown\": \"string (markdown with short step-by-step plan)\",\n"
+        "  \"changes\": [\n"
+        "    {\n"
+        "      \"path\": \"relative/path.ext\",\n"
+        "      \"op\": \"create\" | \"update\",\n"
+        "      \"content\": \"full file content as UTF-8 text\",\n"
+        "      \"message\": \"short commit message for this file (optional)\"\n"
+        "    }\n"
+        "  ],\n"
+        "  \"summary_commit_message\": \"short general commit message\"\n"
+        "}\n\n"
+        f"- No more than {ALLOWED_MAX_FILES} files.\n"
+        f"- Each file must be <= {ALLOWED_MAX_BYTES_PER_FILE} bytes of content.\n"
+        "- Do not delete files. Only create or update.\n"
+        "- Keep code self-contained and runnable. Include imports if needed.\n"
+        "- Prefer small, atomic changes and add/update tests when reasonable.\n"
+        "- Keep paths inside repo; never use absolute or parent paths.\n"
+    )
 
 
     user_prompt = (
