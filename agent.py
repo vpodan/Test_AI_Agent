@@ -128,7 +128,7 @@ def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str
             {"role": "user", "content": user_prompt},
         ],
         "response_format": {"type": "json_object"},
-        token_key: 6000,
+        token_key: 3000,
     }
 
     data = json.dumps(payload).encode("utf-8")
@@ -141,7 +141,7 @@ def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=1200) as resp:
             raw = resp.read().decode("utf-8")
             obj = json.loads(raw)
             content = obj["choices"][0]["message"]["content"]
