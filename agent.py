@@ -153,14 +153,13 @@ def extract_json_object(text: str) -> Dict[str, Any]:
 
 def openai_api_call(system_prompt: str, user_prompt: str) -> Dict[str, Any]:
     """
-    GPT-5 через chat.completions + tool calling (строгая схема).
-    Возвращает dict, собранный из tool_calls[0].function.arguments.
+    GPT-5 через chat.completions + tool calling (жёсткая схема).
+    Возвращает dict из tool_calls[0].function.arguments.
     """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY / OPEN_AI_TOKEN is not set")
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # Описываем "инструмент" с нужной JSON-схемой
     tool = {
         "type": "function",
         "function": {
@@ -182,9 +181,8 @@ def openai_api_call(system_prompt: str, user_prompt: str) -> Dict[str, Any]:
                             "properties": {
                                 "path": {"type": "string"},
                                 "op": {"type": "string", "enum": ["create", "update"]},
-                                "content": {
-                                    "type": ["string", "object", "array", "number", "boolean", "null"]
-                                },
+                                # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: только string
+                                "content": {"type": "string", "description": "Full file content as UTF-8 text. If non-text, provide JSON-serialized string."}
                             },
                         },
                     },
@@ -201,44 +199,44 @@ def openai_api_call(system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         try:
             rsp = client.chat.completions.create(
                 model=os.environ.get("OPENAI_MODEL", "gpt-5"),
-                temperature=1,
-                # ВАЖНО: у gpt-5 именно max_completion_tokens
+                temperature=0,
+                # для gpt-5 нужен именно max_completion_tokens
                 max_completion_tokens=2000,
                 tools=[tool],
                 tool_choice={"type": "function", "function": {"name": "submit_agent_output"}},
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
+                    # Можно дополнительно поджать требования:
+                    {"role": "system", "content": "Return ONLY via the tool call. The tool's 'content' field must be a string (serialize any non-text to JSON)."}
                 ],
             )
 
             choice = rsp.choices[0]
-            # Иногда content пустой — это ок, нам нужен tool_calls
-            tool_calls = getattr(choice.message, "tool_calls", None) or []
-            if not tool_calls:
+            tcs = getattr(choice.message, "tool_calls", None) or []
+            if not tcs:
                 raise ValueError("Model did not return tool_calls")
 
-            fn = tool_calls[0].function
+            fn = tcs[0].function
             args_raw = fn.arguments or ""
             if not isinstance(args_raw, str) or not args_raw.strip():
                 raise ValueError("Empty tool call arguments")
 
-            # arguments гарантированно JSON-строка по схеме
             payload = json.loads(args_raw)
 
-            # Дополнительные проверки размеров/кол-ва сразу здесь
+            # Быстрая валидация и принудительная сериализация (на всякий)
             changes = payload.get("changes", [])
             if not isinstance(changes, list) or len(changes) == 0:
                 raise ValueError("changes must be a non-empty array")
             if len(changes) > ALLOWED_MAX_FILES:
                 raise ValueError(f"Too many files: {len(changes)} (max {ALLOWED_MAX_FILES})")
 
-            # Приводим content к строке при необходимости (будем сериализовать позже)
             for ch in changes:
                 if not isinstance(ch, dict):
                     raise ValueError("Invalid change item")
-                if "content" in ch and not isinstance(ch["content"], str):
-                    ch["content"] = json.dumps(ch["content"], ensure_ascii=False, indent=2)
+                c = ch.get("content", "")
+                if not isinstance(c, str):
+                    ch["content"] = json.dumps(c, ensure_ascii=False, indent=2)
 
             return payload
 
@@ -247,6 +245,7 @@ def openai_api_call(system_prompt: str, user_prompt: str) -> Dict[str, Any]:
             log.error("OpenAI tool-calls error (attempt %d): %s", attempt, e)
 
     raise RuntimeError(f"OpenAI tool-calls failed after retries: {last_err}")
+
 
     def _extract_text_from_response(resp) -> str:
         # SDK v2: удобный хелпер
