@@ -5,12 +5,16 @@
 Autonomous GitHub AI Agent (gpt-5)
 - Анализирует Issue
 - Генерирует план и правки (JSON) через OpenAI Chat Completions
-- Создает ветку, коммиты, пушит и открывает Pull Request
+- Создаёт ветку, коммит, пушит и открывает Pull Request
 - Пишет комментарии в Issue
 
-Зависимости:
-  - PyGithub
-  - GitPython
+ENV (из workflow):
+  GITHUB_TOKEN        - токен GitHub (permissions: contents/pull-requests/issues: write)
+  OPENAI_API_KEY      - ключ OpenAI (или OPEN_AI_TOKEN)
+  OPEN_AI_TOKEN       - альтернативное имя ключа (если не задан OPENAI_API_KEY)
+  REPO_NAME           - org/repo
+  ISSUE_NUMBER        - номер issue (опционально)
+  OPENAI_MODEL        - имя модели (по умолчанию 'gpt-5')
 """
 
 import os
@@ -42,14 +46,13 @@ logging.basicConfig(
 log = logging.getLogger("agent")
 
 # ------------------------- НАСТРОЙКИ/КОНСТ -------------------------
-REPO_NAME = os.environ.get("REPO_NAME")                   # org/repo
+REPO_NAME = os.environ.get("REPO_NAME")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPEN_AI_TOKEN")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5")    # gpt-5 по умолчанию
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5")
 
-# Ограничения безопасности на изменения
 ALLOWED_MAX_FILES = 12
-ALLOWED_MAX_BYTES_PER_FILE = 200_000  # ~= 200 KB на файл
+ALLOWED_MAX_BYTES_PER_FILE = 200_000  # ~200 KB
 FORBIDDEN_PATHS = {
     ".git", ".github/workflows", ".github/actions", ".gitignore",
     "/etc", "/usr", "/bin", "/sbin", "/var", "/tmp"
@@ -62,7 +65,6 @@ def gh_client() -> Github:
     return Github(auth=Auth.Token(GITHUB_TOKEN))
 
 def read_github_event_issue_number() -> int | None:
-    """Пытается вытащить номер issue из файла события GitHub."""
     p = os.environ.get("GITHUB_EVENT_PATH")
     if not p or not Path(p).exists():
         return None
@@ -77,7 +79,6 @@ def read_github_event_issue_number() -> int | None:
     return None
 
 def get_issue_number() -> int | None:
-    """Возвращает номер issue или None (если не удалось определить)."""
     v = os.environ.get("ISSUE_NUMBER")
     if v:
         try:
@@ -91,117 +92,9 @@ def add_issue_comment(repo, issue_number: int, body: str):
     issue.create_comment(body)
     log.info("💬 Comment added to issue #%s", issue_number)
 
-def extract_json_object(text: str) -> dict:
-    """Извлекает первый валидный JSON-объект из произвольного текста."""
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("No JSON object found in model response.")
-    depth = 0
-    last = start
-    for i, ch in enumerate(text[start:], start=start):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                last = i + 1
-                break
-    return json.loads(text[start:last])
-
-def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str) -> dict:
-    """
-    Вызов OpenAI Chat Completions.
-    Для gpt-5 используем max_completion_tokens; дополнительно:
-    - temperature низкая (0.1) для детерминизма,
-    - сокращен лимит, чтобы быстрее и компактнее,
-    - многоступенчатый парсинг + автопочинка JSON.
-    """
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY/OPEN_AI_TOKEN is not set.")
-
-    url = "https://api.openai.com/v1/chat/completions"
-    token_key = "max_completion_tokens" if model.startswith("gpt-5") else "max_tokens"
-
-    payload = {
-        "model": model,
-        "temperature": 1,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "response_format": {"type": "json_object"},
-        token_key: 2500,   # было 3000 — уменьшаем, чтобы снизить риск «болтовни»
-    }
-
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-    )
-
-    raw_content = None
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            raw = resp.read().decode("utf-8")
-            obj = json.loads(raw)
-            raw_content = obj["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as e:
-        msg = e.read().decode("utf-8", errors="ignore")
-        log.error("OpenAI HTTPError: %s", msg)
-        raise
-    except TimeoutError:
-        log.warning("⏳ Timeout waiting for OpenAI; retrying once with smaller completion limit...")
-        # Одно повторение с ещё меньшим лимитом
-        payload[token_key] = 1500
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=data, method="POST",
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=900) as resp:
-            raw = resp.read().decode("utf-8")
-            obj = json.loads(raw)
-            raw_content = obj["choices"][0]["message"]["content"]
-    except Exception:
-        log.exception("OpenAI request failed")
-        raise
-
-    # Попытка 1: прямой парсинг
-    try:
-        return json.loads(raw_content)
-    except Exception:
-        pass
-
-    # Попытка 2: снять бэктики/ограды и распарсить
-    try:
-        candidate = _strip_code_fences(raw_content)
-        return json.loads(candidate)
-    except Exception:
-        pass
-
-    # Попытка 3: балансно извлечь первый объект {…}
-    try:
-        return extract_json_object(raw_content)
-    except Exception:
-        # Логируем усечённый ответ и просим модель «починить JSON»
-        preview = (raw_content or "")[:800]
-        log.warning("Model did not return clean JSON, trying to repair… Preview: %r", preview)
-        fixed = _repair_json_with_llm(raw_content, model)
-        return fixed
-
-
 def _strip_code_fences(text: str) -> str:
-    """Снимает ```json ... ``` / ``` ... ``` и возвращает внутренность."""
-    t = text.strip()
+    t = (text or "").strip()
     if t.startswith("```"):
-        # отрезаем первую строчку (```json или ```), и последнюю ```
         lines = t.splitlines()
         if lines and lines[0].startswith("```"):
             lines = lines[1:]
@@ -210,22 +103,33 @@ def _strip_code_fences(text: str) -> str:
         return "\n".join(lines).strip()
     return t
 
+def extract_json_object(text: str) -> dict:
+    s = text or ""
+    start = s.find("{")
+    end = s.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("No JSON object found in model response.")
+    depth = 0
+    last = start
+    for i, ch in enumerate(s[start:], start=start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                last = i + 1
+                break
+    return json.loads(s[start:last])
 
 def _repair_json_with_llm(bad_text: str, model: str) -> dict:
-    """
-    Просим модель вернуть ТОЛЬКО валидный JSON, починив формат.
-    Используем тот же ключ API; лимит небольшой, температура минимальная.
-    """
     url = "https://api.openai.com/v1/chat/completions"
     token_key = "max_completion_tokens" if model.startswith("gpt-5") else "max_tokens"
-
     system = (
         "You are a strict JSON repair tool. "
         "You receive a model output that should contain ONE JSON object. "
         "Return ONLY a valid, minified JSON object. No explanations, no backticks."
     )
     user = f"Fix and return only JSON object from the following text:\n\n{bad_text}"
-
     payload = {
         "model": model,
         "temperature": 0.0,
@@ -248,15 +152,93 @@ def _repair_json_with_llm(bad_text: str, model: str) -> dict:
         raw = resp.read().decode("utf-8")
         obj = json.loads(raw)
         content = obj["choices"][0]["message"]["content"]
-
-    # последняя попытка — прямой parse либо извлечение
     try:
         return json.loads(content)
     except Exception:
         return extract_json_object(content)
 
+def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str) -> dict:
+    """
+    Вызов OpenAI Chat Completions.
+    gpt-5 → max_completion_tokens, ретраи, таймаут 300, многоступенчатый парсинг/ремонт.
+    """
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY/OPEN_AI_TOKEN is not set.")
+
+    url = "https://api.openai.com/v1/chat/completions"
+    token_key = "max_completion_tokens" if model.startswith("gpt-5") else "max_tokens"
+    payload = {
+        "model": model,
+        "temperature": 0.1,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        token_key: 1500,
+    }
+    data = json.dumps(payload).encode("utf-8")
+
+    def _do_request():
+        req = urllib.request.Request(
+            url, data=data, method="POST",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            raw = resp.read().decode("utf-8")
+            obj = json.loads(raw)
+            return obj["choices"][0]["message"]["content"]
+
+    # Ретраи при таймауте
+    attempts = 0
+    raw_content = None
+    while attempts < 3:
+        try:
+            raw_content = _do_request()
+            break
+        except TimeoutError:
+            attempts += 1
+            log.warning("⏳ Timeout waiting for OpenAI (attempt %d/3)", attempts)
+            if attempts == 1:
+                # ужимаем длину ответа
+                payload[token_key] = 900
+                data = json.dumps(payload).encode("utf-8")
+            elif attempts == 2:
+                payload[token_key] = 600
+                data = json.dumps(payload).encode("utf-8")
+        except urllib.error.HTTPError as e:
+            msg = e.read().decode("utf-8", errors="ignore")
+            log.error("OpenAI HTTPError: %s", msg)
+            raise
+        except Exception:
+            log.exception("OpenAI request failed")
+            raise
+
+    if raw_content is None:
+        raise TimeoutError("OpenAI did not return in time after retries.")
+
+    # Парсинг 1
+    try:
+        return json.loads(raw_content)
+    except Exception:
+        pass
+    # Парсинг 2
+    try:
+        return json.loads(_strip_code_fences(raw_content))
+    except Exception:
+        pass
+    # Парсинг 3
+    try:
+        return extract_json_object(raw_content)
+    except Exception:
+        preview = (raw_content or "")[:800]
+        log.warning("Model did not return clean JSON, trying to repair… Preview: %r", preview)
+        return _repair_json_with_llm(raw_content, model)
+
 def safe_path(path_str: str) -> Path:
-    """Проверяет путь и возвращает безопасный относительный Path внутри репозитория."""
     p = Path(path_str).as_posix().lstrip("/")
     p = Path(p)
     for f in FORBIDDEN_PATHS:
@@ -267,11 +249,6 @@ def safe_path(path_str: str) -> Path:
     return p
 
 def apply_changes_locally(repo_root: Path, changes: list[dict]) -> list[str]:
-    """
-    Применяет изменения.
-    Элемент changes:
-      { "path": "rel/file.py", "op": "create|update", "content": "…", "message": "…" }
-    """
     if len(changes) > ALLOWED_MAX_FILES:
         raise ValueError(f"Too many files: {len(changes)} (limit {ALLOWED_MAX_FILES})")
 
@@ -364,7 +341,7 @@ def main():
     gh_repo = gh.get_repo(REPO_NAME)
     base_branch = gh_repo.default_branch or "main"
 
-    # Если номер не указан — берём самый свежий open issue с лейблом ai-agent
+    # Если номера нет — берём последний open issue с лейблом ai-agent
     if issue_number is None:
         log.info("ℹ️ ISSUE_NUMBER not provided — searching for open issues with label 'ai-agent'.")
         try:
@@ -398,25 +375,18 @@ def main():
         ],
     )
 
-   system_prompt = (
-        "You are an autonomous senior Python engineer working inside a CI bot for GitHub.\n"
+    system_prompt = (
+        "You are an autonomous senior Python engineer inside a CI bot for GitHub.\n"
         "Given an issue (title + body) and a brief repo context, you must propose a minimal,\n"
         "safe and incremental solution and PRODUCE CONCRETE CODE CHANGES.\n\n"
-        "Return ONLY a valid JSON object with this schema:\n"
-        "{\n"
-        "  \"plan_markdown\": \"string (markdown with short step-by-step plan)\",\n"
-        "  \"changes\": [\n"
-        "    {\n"
-        "      \"path\": \"relative/path.ext\",\n"
-        "      \"op\": \"create\" | \"update\",\n"
-        "      \"content\": \"full file content as UTF-8 text\",\n"
-        "      \"message\": \"short commit message for this file (optional)\"\n"
-        "    }\n"
-        "  ],\n"
-        "  \"summary_commit_message\": \"short general commit message\"\n"
-        "}\n\n"
-        f"- No more than {ALLOWED_MAX_FILES} files.\n"
-        f"- Each file must be <= {ALLOWED_MAX_BYTES_PER_FILE} bytes of content.\n"
+        "Return ONLY a valid, minified JSON object with this exact schema:\n"
+        "{"
+        "\"plan_markdown\":\"string\","
+        "\"changes\":[{\"path\":\"string\",\"op\":\"create|update\",\"content\":\"string\",\"message\":\"string(optional)\"}],"
+        "\"summary_commit_message\":\"string\""
+        "}\n"
+        "- No prose, no backticks, no markdown fences. Single JSON object only.\n"
+        f"- No more than {ALLOWED_MAX_FILES} files; each file <= {ALLOWED_MAX_BYTES_PER_FILE} bytes.\n"
         "- Do not delete files. Only create or update.\n"
         "- Keep code self-contained and runnable. Include imports if needed.\n"
         "- Prefer small, atomic changes and add/update tests when reasonable.\n"
@@ -494,7 +464,6 @@ if __name__ == "__main__":
     except Exception as e:
         log.error("❌ Unhandled error: %s", e)
         traceback.print_exc()
-        # Попробуем оставить след в issue
         try:
             if REPO_NAME and GITHUB_TOKEN:
                 gh = gh_client()
@@ -505,6 +474,7 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(1)
+
 
 
 
