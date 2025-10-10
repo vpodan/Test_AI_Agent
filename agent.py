@@ -156,28 +156,102 @@ def openai_api_call(system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         raise RuntimeError("OPENAI_API_KEY / OPEN_AI_TOKEN is not set")
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    max_retries = 2
-    last_err: Optional[Exception] = None
-    for attempt in range(1, max_retries + 2):
-        try:
-            rsp = client.chat.completions.create(
-                model=OPENAI_MODEL,
-                temperature=1,
-                max_completion_tokens=2000,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-            txt = rsp.choices[0].message.content
-            log.info("✓ OpenAI call ok (attempt %d)", attempt)
-            obj = extract_json_object(txt)
-            log.info("✓ JSON extracted")
-            return obj
-        except Exception as e:
-            last_err = e
-            log.error("OpenAI error (attempt %d): %s", attempt, e)
-    raise RuntimeError(f"OpenAI call failed after retries: {last_err}")
+    # 1) Попытка №1: Responses API + строгая JSON-схема
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["plan_markdown", "changes", "summary_commit_message"],
+        "properties": {
+            "plan_markdown": {"type": "string"},
+            "changes": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["path", "op", "content"],
+                    "properties": {
+                        "path": {"type": "string"},
+                        "op": {"type": "string", "enum": ["create", "update"]},
+                        "content": {"type": ["string", "object", "array", "number", "boolean", "null"]},
+                    },
+                },
+            },
+            "summary_commit_message": {"type": "string"},
+        },
+    }
+
+    def _extract_text_from_response(resp) -> str:
+        # SDK v2: удобный хелпер
+        txt = getattr(resp, "output_text", None)
+        if isinstance(txt, str) and txt.strip():
+            return txt
+        # Универсальный обход структуры output
+        out = getattr(resp, "output", None)
+        if isinstance(out, list):
+            for item in out:
+                # Ожидаем item.type == "message"
+                content = getattr(item, "content", None)
+                if isinstance(content, list):
+                    for c in content:
+                        # c может иметь .text.value
+                        text_obj = getattr(c, "text", None)
+                        if isinstance(text_obj, dict):
+                            val = text_obj.get("value") or text_obj.get("text")
+                            if isinstance(val, str) and val.strip():
+                                return val
+                        elif isinstance(text_obj, str) and text_obj.strip():
+                            return text_obj
+        return ""
+
+    last_err = None
+
+    # Попытка через Responses API с json_schema
+    try:
+        resp = client.responses.create(
+            model=os.environ.get("OPENAI_MODEL", "gpt-5"),
+            reasoning={"effort": "medium"},
+            input=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_output_tokens=2000,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "AgentOutput",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        )
+        txt = _extract_text_from_response(resp)
+        if not txt.strip():
+            raise ValueError("Empty text from Responses API")
+        return extract_json_object(txt)
+    except Exception as e:
+        last_err = e
+        log.warning("Responses API failed, falling back to chat.completions: %s", e)
+
+    # 2) Фолбэк: chat.completions с требованием JSON-объекта
+    try:
+        rsp = client.chat.completions.create(
+            model=os.environ.get("OPENAI_MODEL", "gpt-5"),
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            # у chat.completions корректный параметр — max_tokens:
+            max_tokens=2000,
+        )
+        txt = (rsp.choices[0].message.content or "").strip()
+        if not txt:
+            raise ValueError("Empty content from chat.completions")
+        return extract_json_object(txt)
+    except Exception as e2:
+        raise RuntimeError(f"OpenAI call failed (Responses + Chat fallback): {last_err} / {e2}")
 
 def safe_path(path_str: str) -> Path:
     p = Path(path_str).as_posix().lstrip("/")
