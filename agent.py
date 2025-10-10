@@ -122,7 +122,7 @@ def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str
 
     payload = {
         "model": model,
-        "temperature": 0.2,
+        "temperature": 1,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
