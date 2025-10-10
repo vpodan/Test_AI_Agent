@@ -111,8 +111,11 @@ def extract_json_object(text: str) -> dict:
 
 def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str) -> dict:
     """
-    Вызов OpenAI Chat Completions. Для gpt-5 используем max_completion_tokens.
-    Возвращаем строго dict.
+    Вызов OpenAI Chat Completions.
+    Для gpt-5 используем max_completion_tokens; дополнительно:
+    - temperature низкая (0.1) для детерминизма,
+    - сокращен лимит, чтобы быстрее и компактнее,
+    - многоступенчатый парсинг + автопочинка JSON.
     """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY/OPEN_AI_TOKEN is not set.")
@@ -128,7 +131,7 @@ def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str
             {"role": "user", "content": user_prompt},
         ],
         "response_format": {"type": "json_object"},
-        token_key: 3000,
+        token_key: 2500,   # было 3000 — уменьшаем, чтобы снизить риск «болтовни»
     }
 
     data = json.dumps(payload).encode("utf-8")
@@ -140,23 +143,116 @@ def openai_chat_completion_json(system_prompt: str, user_prompt: str, model: str
         },
     )
 
+    raw_content = None
     try:
-        with urllib.request.urlopen(req, timeout=1200) as resp:
+        with urllib.request.urlopen(req, timeout=300) as resp:
             raw = resp.read().decode("utf-8")
             obj = json.loads(raw)
-            content = obj["choices"][0]["message"]["content"]
+            raw_content = obj["choices"][0]["message"]["content"]
     except urllib.error.HTTPError as e:
         msg = e.read().decode("utf-8", errors="ignore")
         log.error("OpenAI HTTPError: %s", msg)
         raise
+    except TimeoutError:
+        log.warning("⏳ Timeout waiting for OpenAI; retrying once with smaller completion limit...")
+        # Одно повторение с ещё меньшим лимитом
+        payload[token_key] = 1500
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, method="POST",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=900) as resp:
+            raw = resp.read().decode("utf-8")
+            obj = json.loads(raw)
+            raw_content = obj["choices"][0]["message"]["content"]
     except Exception:
         log.exception("OpenAI request failed")
         raise
 
+    # Попытка 1: прямой парсинг
+    try:
+        return json.loads(raw_content)
+    except Exception:
+        pass
+
+    # Попытка 2: снять бэктики/ограды и распарсить
+    try:
+        candidate = _strip_code_fences(raw_content)
+        return json.loads(candidate)
+    except Exception:
+        pass
+
+    # Попытка 3: балансно извлечь первый объект {…}
+    try:
+        return extract_json_object(raw_content)
+    except Exception:
+        # Логируем усечённый ответ и просим модель «починить JSON»
+        preview = (raw_content or "")[:800]
+        log.warning("Model did not return clean JSON, trying to repair… Preview: %r", preview)
+        fixed = _repair_json_with_llm(raw_content, model)
+        return fixed
+
+
+def _strip_code_fences(text: str) -> str:
+    """Снимает ```json ... ``` / ``` ... ``` и возвращает внутренность."""
+    t = text.strip()
+    if t.startswith("```"):
+        # отрезаем первую строчку (```json или ```), и последнюю ```
+        lines = t.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+    return t
+
+
+def _repair_json_with_llm(bad_text: str, model: str) -> dict:
+    """
+    Просим модель вернуть ТОЛЬКО валидный JSON, починив формат.
+    Используем тот же ключ API; лимит небольшой, температура минимальная.
+    """
+    url = "https://api.openai.com/v1/chat/completions"
+    token_key = "max_completion_tokens" if model.startswith("gpt-5") else "max_tokens"
+
+    system = (
+        "You are a strict JSON repair tool. "
+        "You receive a model output that should contain ONE JSON object. "
+        "Return ONLY a valid, minified JSON object. No explanations, no backticks."
+    )
+    user = f"Fix and return only JSON object from the following text:\n\n{bad_text}"
+
+    payload = {
+        "model": model,
+        "temperature": 0.0,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "response_format": {"type": "json_object"},
+        token_key: 800,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, method="POST",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        raw = resp.read().decode("utf-8")
+        obj = json.loads(raw)
+        content = obj["choices"][0]["message"]["content"]
+
+    # последняя попытка — прямой parse либо извлечение
     try:
         return json.loads(content)
     except Exception:
-        log.warning("Model did not return clean JSON, trying to extract object…")
         return extract_json_object(content)
 
 def safe_path(path_str: str) -> Path:
@@ -302,30 +398,24 @@ def main():
         ],
     )
 
-    system_prompt = (
-        "You are an autonomous senior Python engineer working inside a CI bot for GitHub.\n"
-        "Given an issue (title + body) and a brief repo context, you must propose a minimal,\n"
-        "safe and incremental solution and PRODUCE CONCRETE CODE CHANGES.\n\n"
-        "Return ONLY a valid JSON object with this schema:\n"
-        "{\n"
-        "  \"plan_markdown\": \"string (markdown with short step-by-step plan)\",\n"
-        "  \"changes\": [\n"
-        "    {\n"
-        "      \"path\": \"relative/path.ext\",\n"
-        "      \"op\": \"create\" | \"update\",\n"
-        "      \"content\": \"full file content as UTF-8 text\",\n"
-        "      \"message\": \"short commit message for this file (optional)\"\n"
-        "    }\n"
-        "  ],\n"
-        "  \"summary_commit_message\": \"short general commit message\"\n"
-        "}\n\n"
-        f"- No more than {ALLOWED_MAX_FILES} files.\n"
-        f"- Each file must be <= {ALLOWED_MAX_BYTES_PER_FILE} bytes of content.\n"
-        "- Do not delete files. Only create or update.\n"
-        "- Keep code self-contained and runnable. Include imports if needed.\n"
-        "- Prefer small, atomic changes and add/update tests when reasonable.\n"
-        "- Keep paths inside repo; never use absolute or parent paths.\n"
-    )
+ system_prompt = (
+    "You are an autonomous senior Python engineer inside a CI bot for GitHub.\n"
+    "Given an issue (title + body) and a brief repo context, you must propose a minimal,\n"
+    "safe and incremental solution and PRODUCE CONCRETE CODE CHANGES.\n\n"
+    "Return ONLY a **valid, minified JSON object** with this exact schema:\n"
+    "{\n"
+    "  \"plan_markdown\": \"string\",\n"
+    "  \"changes\": [ { \"path\": \"string\", \"op\": \"create|update\", \"content\": \"string\", \"message\": \"string(optional)\" } ],\n"
+    "  \"summary_commit_message\": \"string\"\n"
+    "}\n"
+    "- No prose, no backticks, no markdown fences. Output must be a single JSON object.\n"
+    f"- No more than {ALLOWED_MAX_FILES} files; each file <= {ALLOWED_MAX_BYTES_PER_FILE} bytes.\n"
+    "- Do not delete files. Only create or update.\n"
+    "- Keep code self-contained and runnable. Include imports if needed.\n"
+    "- Prefer small, atomic changes and add/update tests when reasonable.\n"
+    "- Keep paths inside repo; never use absolute or parent paths.\n"
+)
+
 
     user_prompt = (
         f"Issue Title:\n{issue_title}\n\n"
