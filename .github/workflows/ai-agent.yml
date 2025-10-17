@@ -34,10 +34,10 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: 📦 Install dependencies
+          - name: 📦 Install dependencies
         run: |
-          pip install PyGithub gitpython
-          # openai не обязателен для текущей реализации через urllib
+          pip install PyGithub gitpython openai
+
 
       - name: ⚙️ Configure Git
         run: |
